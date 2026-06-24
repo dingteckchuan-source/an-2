@@ -1,0 +1,15 @@
+# 运行日志
+asx_scanner_run.log
+*.log
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 生成的报告（保留在桌面，不纳入版本库）
+ASX_报告_*.md
+
+# 工作/输出目录
+work/
+outputs/
+.claude/
