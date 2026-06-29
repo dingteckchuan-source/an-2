@@ -1,12 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-ASX 相对强度 + 巴菲特价值 双重选股扫描器 (本地版)
+ASX 纯动量「领涨抗跌」强势股扫描器 (本地版)
 ===================================================
+核心信条:
+  "When the market goes up, there's certain stocks and sectors go up a lot more,
+   and when the market goes down those things don't really fall."
+
 逻辑:
-  1. 行业板块筛选  —— 11 个 ASX 行业指数的「领涨抗跌」相对强度
-  2. 个股技术筛选  —— ASX200 成分股，站上 50 日均线 + 领涨抗跌
-  3. 基本面交叉验证 —— 对技术面通过者做巴菲特价值四项检验
-  4. 生成 Markdown 报告并保存到 Windows 桌面 (不发送邮件)
+  1. 行业板块筛选 —— 11 个 ASX 行业指数的「领涨抗跌」相对强度（呼应「sectors」）
+  2. 个股纯技术筛选 —— ASX200 成分股，同时满足以下三个条件即为「纯动量强势股」:
+       · 条件 A（领涨）: 个股在 XJO 上涨日的平均涨幅 > XJO 平均涨幅
+       · 条件 B（抗跌）: 个股在 XJO 下跌日的平均跌幅 < XJO 平均跌幅的 50%
+                         （要求极其抗跌，甚至逆势上涨）
+       · 条件 C（趋势护栏）: 当前价格站上 50 日均线
+  3. 生成精简 Markdown 报告并保存到 Windows 桌面 (不发送邮件)
 
 数据源: Yahoo Finance (yfinance)
 
@@ -16,32 +23,21 @@ ASX 相对强度 + 巴菲特价值 双重选股扫描器 (本地版)
 ───────────────────────────────────────────────────────────────────────────────
 变更历史 / 关键设计决策
 ───────────────────────────────────────────────────────────────────────────────
+[2026-06-29] 彻底删除巴菲特价值基本面维度，重构为纯技术面动量筛选
+  • 起因：回归核心信条——只关心「涨得更多、跌得更少」的相对强度，不再混入估值。
+  • 删除：safe_get_info / compute_dividend_yield / 基本面交叉验证整块逻辑，
+          以及 PE / 股息率 / ROE / 营运现金流 / PEG 所有获取与阈值。
+  • 抗跌门槛收紧：RESIST_FACTOR 0.7 → 0.5（个股下跌日跌幅须 < 大盘跌幅的一半）。
+  • 报告精简：剔除所有基本面表格，专注「纯动量强势股」（同时满足 A/B/C 三条件）。
+
 [2026-06-25] 股票池扩展至完整 ASX200 (~194 只)
   • 起因：原 68 只大盘股池天然偏高 Beta，「领涨抗跌」组合极稀有，常出现 0 候选。
-  • 诊断证实瓶颈在股票池广度（非筛选阈值）：扩池后技术面通过 1→8 只、双击 0→2 只。
-  • 涌现出的双击标的（如 DRR 特许权、PMV 零售）正是原窄池缺失的低波动/防御型标的。
   • 已剔除退市/被收购：NCM(Newcrest), AWC(Alumina), ALU(Altium), AKE(Allkem), LNK(Link)。
-
-[2026-06-25] 修复股息率单位 bug（重要 — 否则污染结果）
-  • 现象：CDA(Codan) 真实股息率 0.89% 被误算成 89%，导致其假冒「双击」。
-  • 根因：当前 yfinance 的 dividendYield 字段为【百分数单位】(0.89 表示 0.89%)，
-          旧逻辑误把 <1 的值当作小数（0.89 → 89%）。
-  • 修复：compute_dividend_yield() 优先用【每股股息 dividendRate ÷ 现价】直接计算
-          （单位无歧义），回退时统一 ÷100，并设 30% 合理性上限过滤脏数据。
-
-[2026-06-24] 引入 PEG 估值维度
-  • 「估值合理」改为 PE ≤ 20 *或* PEG < 1.5 任一达标，避免错杀高增长动量股。
-  • 报告各表新增 PEG 列。
-
-[2026-06-24] 放宽阈值（应对当前市场过严）
-  • PE 门槛 15 → 20；股息率 4% → 3%。
-  • 技术面抗跌系数 RESIST_FACTOR 0.5 → 0.7（注：诊断显示该项非主要瓶颈，
-    真正杠杆是上面的扩池；继续放宽会引入高 Beta 股、背离「抗跌」本意，故止于 0.7）。
 
 [2026-06-24] 修正失效行业指数 + 下载重试机制
   • 房地产指数 ^AXRJ(失效) → ^AXPJ(A-REIT)；通信指数 ^AXKJ 无可用源，已移除
     （其成分股 TLS/TPG/REA 仍纳入个股池）。
-  • safe_download / safe_get_info 加入 3 次退避重试，应对偶发连接重置。
+  • safe_download 加入 3 次退避重试，应对偶发连接重置。
 
 [2026-06-24] 本地化（原为云端定时任务，因云端 yfinance 遭 403 代理封锁而改本地）
   • 取消邮件发送；报告存至 Windows 桌面（兼容 OneDrive 重定向），跑完自动打开。
@@ -85,16 +81,9 @@ START_DATE = END_DATE - timedelta(days=100)   # ~3 个月交易日
 MA_START   = END_DATE - timedelta(days=130)   # 50 日均线需额外历史
 BENCHMARK  = "^AXJO"                           # S&P/ASX 200
 
-# 价值筛选阈值（2026-06 放宽：当前市场下原 PE15/股息4% 过严，易出现 0 完美候选）
-PE_MAX     = 20.0    # 市盈率 <= 20（原 15）
-DY_MIN     = 0.03    # 股息率 >= 3%（原 4%）
-ROE_MIN    = 0.15    # 净资产收益率 >= 15%
-PEG_FAIR   = 1.5     # PEG < 1.5 视为估值合理（< 1 低估，1-1.5 合理）
-# 营运现金流 > 0
-
-# 技术面「抗跌」阈值：个股/板块下跌日均跌幅 > 基准跌幅 × 此系数 即算抗跌。
-# 跌幅为负数，系数越大门槛越宽松。2026-06 由 0.5 放宽至 0.7。
-RESIST_FACTOR = 0.7
+# 技术面「抗跌」阈值：个股/板块在大盘下跌日的平均跌幅须 < 大盘平均跌幅 × 此系数 即算抗跌。
+# 跌幅为负数：系数 0.5 表示个股跌幅须不及大盘的一半（极其抗跌，甚至逆势上涨）。
+RESIST_FACTOR = 0.5
 
 SECTORS = {
     "能源 Energy":        "^AXEJ",
@@ -131,7 +120,7 @@ ASX200_STOCKS = {
     "WDS.AX": "Woodside", "STO.AX": "Santos", "WHC.AX": "Whitehaven Coal",
     "NHC.AX": "New Hope", "VEA.AX": "Viva Energy", "BPT.AX": "Beach Energy",
     "KAR.AX": "Karoon Energy", "YAL.AX": "Yancoal", "ALD.AX": "Ampol",
-    "WDS.AX": "Woodside", "COE.AX": "Cooper Energy",
+    "COE.AX": "Cooper Energy",
     # ── Financials ──
     "CBA.AX": "CBA", "WBC.AX": "Westpac", "ANZ.AX": "ANZ", "NAB.AX": "NAB",
     "MQG.AX": "Macquarie", "SUN.AX": "Suncorp", "QBE.AX": "QBE",
@@ -163,7 +152,7 @@ ASX200_STOCKS = {
     "NEU.AX": "Neuren Pharma", "CUV.AX": "Clinuvel", "NAN.AX": "Nanosonics",
     "PNV.AX": "PolyNovo", "IDX.AX": "Integral Diagnostics", "HLS.AX": "Healius",
     "EBO.AX": "Ebos Group", "SIG.AX": "Sigma Healthcare", "MVF.AX": "Monash IVF",
-    "CU6.AX": "Clarity Pharma", "RMD.AX": "ResMed",
+    "CU6.AX": "Clarity Pharma",
     # ── Information Technology ──
     "WTC.AX": "WiseTech Global", "XRO.AX": "Xero", "TNE.AX": "TechnologyOne",
     "NXT.AX": "NEXTDC", "DTL.AX": "Data#3", "MP1.AX": "Megaport",
@@ -224,54 +213,11 @@ def safe_download(ticker, start, end):
     return pd.DataFrame()
 
 
-def safe_get_info(full_ticker):
-    """获取基本面 info，带重试。失败返回空 dict。"""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            info = yf.Ticker(full_ticker).info
-            if info:
-                return info
-        except Exception as e:
-            if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-            else:
-                print(f"  [基本面获取失败] {full_ticker}: {e}")
-    return {}
-
-
 def get_returns(df, min_len=20):
     if df.empty or "Close" not in df.columns:
         return None
     r = df["Close"].squeeze().pct_change().dropna()
     return r if len(r) >= min_len else None
-
-
-def compute_dividend_yield(info):
-    """稳健计算股息率（小数形式，如 0.055=5.5%）。
-    优先用 每股股息 dividendRate / 现价（单位无歧义）；
-    回退到 dividendYield 字段——当前 yfinance 该字段为百分数单位（0.89 表示 0.89%），故统一 ÷100。
-    设 30% 合理性上限，超出视为脏数据返回 None。"""
-    rate = info.get("dividendRate")
-    price = info.get("currentPrice") or info.get("previousClose") or info.get("regularMarketPrice")
-    dy = None
-    try:
-        if rate is not None and price:
-            dy = float(rate) / float(price)
-    except (TypeError, ValueError, ZeroDivisionError):
-        dy = None
-    if dy is None:
-        raw = info.get("dividendYield")
-        try:
-            dy = float(raw) / 100.0 if raw is not None else None  # 字段为百分数单位
-        except (TypeError, ValueError):
-            dy = None
-    if dy is not None and (dy < 0 or dy > 0.30):   # 合理性上限，过滤脏数据
-        return None
-    return dy
-
-
-def fmt_pct(x, dp=3):
-    return "N/A" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:+.{dp}%}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,7 +248,7 @@ def analyse_benchmark():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Block B —— 行业板块
+# Block B —— 行业板块（领涨抗跌相对强度）
 # ─────────────────────────────────────────────────────────────────────────────
 def screen_sectors(bm):
     print("\n正在分析行业板块 ...")
@@ -327,7 +273,7 @@ def screen_sectors(bm):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Block C —— 个股技术面 (相对强度 + 50 日均线)
+# Block C —— 个股纯技术筛选 (领涨 A + 抗跌 B + 趋势护栏 C)
 # ─────────────────────────────────────────────────────────────────────────────
 def screen_stocks_technical(bm):
     print("\n正在筛选个股技术面 (可能需 1-2 分钟) ...")
@@ -341,7 +287,7 @@ def screen_stocks_technical(bm):
             ma50 = close.rolling(50).mean()
             price = float(close.iloc[-1])
             ma50v = float(ma50.iloc[-1])
-            above = price > ma50v
+            above = price > ma50v   # 条件 C：站上 50 日均线
 
             ret = close.pct_change().dropna()
             aligned = ret.reindex(bm["ret"].index).dropna()
@@ -350,8 +296,8 @@ def screen_stocks_technical(bm):
             bm_a = bm["ret"].reindex(aligned.index)
             avg_up = float(aligned[bm_a > 0].mean())
             avg_down = float(aligned[bm_a < 0].mean())
-            beat_up = avg_up > bm["avg_up"]
-            resist_down = avg_down > bm["avg_down"] * RESIST_FACTOR
+            beat_up = avg_up > bm["avg_up"]                       # 条件 A：领涨
+            resist_down = avg_down > bm["avg_down"] * RESIST_FACTOR  # 条件 B：抗跌
 
             rows.append(dict(
                 ticker=ticker.replace(".AX", ""), full_ticker=ticker, name=cname,
@@ -363,70 +309,24 @@ def screen_stocks_technical(bm):
         except Exception as e:
             print(f"  [错误] {ticker}: {e}")
     passing = [r for r in rows if r["rs_pass"]]
-    print(f"  共扫描 {len(rows)} 只 | 技术面通过 {len(passing)} 只")
+    print(f"  共扫描 {len(rows)} 只 | 三条件全通过 {len(passing)} 只")
     return rows, passing
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Block D —— 基本面交叉验证 (巴菲特价值)
+# Block D —— 生成精简 Markdown 报告（纯动量强势股）
 # ─────────────────────────────────────────────────────────────────────────────
-def fundamental_validation(passing_stocks):
-    print("\n正在做基本面交叉验证 (巴菲特价值四项) ...")
-    for s in passing_stocks:
-        pe = dy = roe = ocf = peg = None
-        info = safe_get_info(s["full_ticker"])
-        if info:
-            pe = info.get("trailingPE") or info.get("forwardPE")
-            dy = compute_dividend_yield(info)
-            roe = info.get("returnOnEquity")
-            ocf = info.get("operatingCashflow") or info.get("freeCashflow")
-            peg = info.get("trailingPegRatio") or info.get("pegRatio")
-
-        def _f(v):
-            try:
-                return float(v) if v is not None else None
-            except (TypeError, ValueError):
-                return None
-        pe, roe, ocf, peg = _f(pe), _f(roe), _f(ocf), _f(peg)
-
-        # 估值合理：PE 达标 或 PEG 合理（任一即可，避免错杀高增长动量股）
-        pe_ok  = pe is not None and pe > 0 and pe <= PE_MAX
-        peg_ok = peg is not None and peg > 0 and peg < PEG_FAIR
-        val_ok = pe_ok or peg_ok
-        dy_ok  = dy is not None and dy >= DY_MIN
-        roe_ok = roe is not None and roe >= ROE_MIN
-        ocf_ok = ocf is not None and ocf > 0
-
-        s.update(pe=pe, dy=dy, roe=roe, ocf=ocf, peg=peg,
-                 pe_ok=pe_ok, peg_ok=peg_ok, val_ok=val_ok,
-                 dy_ok=dy_ok, roe_ok=roe_ok, ocf_ok=ocf_ok,
-                 criteria_met=sum([val_ok, dy_ok, roe_ok, ocf_ok]),
-                 dbl_play=bool(val_ok and dy_ok and roe_ok and ocf_ok))
-
-        pe_str = f"{pe:.1f}x" if pe is not None else "N/A"
-        peg_str = f"{peg:.2f}" if peg is not None else "N/A"
-        dy_str = f"{dy:.2%}" if dy is not None else "N/A"
-        roe_str = f"{roe:.2%}" if roe is not None else "N/A"
-        mark = "⭐ 双击!" if s["dbl_play"] else f"{s['criteria_met']}/4"
-        print(f"  {s['ticker']:<6} PE={pe_str:<7} PEG={peg_str:<6} DY={dy_str:<7} "
-              f"ROE={roe_str:<8} OCF={'+' if ocf_ok else '-'}  -> {mark}")
-
-    double_play = [s for s in passing_stocks if s["dbl_play"]]
-    print(f"  动量+价值双击标的: {len(double_play)} 只")
-    return double_play
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Block E —— 生成 Markdown 报告
-# ─────────────────────────────────────────────────────────────────────────────
-def build_report(bm, sectors, all_stocks, passing_stocks, double_play):
+def build_report(bm, sectors, all_stocks, passing_stocks):
     today = datetime.today().strftime("%Y-%m-%d")
     period = f"{START_DATE.strftime('%Y-%m-%d')} ~ {today}"
     L = []
     A = L.append
 
-    A("# ASX 相对强度 + 价值双重筛选报告")
+    A("# ASX 纯动量「领涨抗跌」强势股报告")
     A(f"**报告日期**: {today}  |  **分析区间**: {period}  |  **数据源**: Yahoo Finance")
+    A("")
+    A("> *\"When the market goes up, there's certain stocks and sectors go up a lot more,")
+    A("> and when the market goes down those things don't really fall.\"*")
     A("")
     A("---\n")
 
@@ -441,22 +341,15 @@ def build_report(bm, sectors, all_stocks, passing_stocks, double_play):
     A("\n---\n")
 
     # 筛选框架
-    A("## 二、筛选框架\n")
-    A("**阶段一 · 技术面「领涨抗跌」**")
-    A("> - 条件 A：XJO 上涨日，平均涨幅 > XJO 均值")
-    A(f"> - 条件 B：XJO 下跌日，平均跌幅 < XJO 跌幅的 {RESIST_FACTOR:.0%}（抗跌）")
-    A("> - 条件 C（个股）：价格站上 50 日均线\n")
-    A("**阶段二 · 巴菲特价值基本面**")
-    A(f"> - **估值合理**：市盈率 PE ≤ {PE_MAX:.0f} 倍 **或** PEG < {PEG_FAIR}"
-      f"（任一即可，PEG 用于避免错杀高增长动量股）")
-    A(f"> - 股息率 ≥ {DY_MIN:.0%}")
-    A(f"> - 净资产收益率 ROE ≥ {ROE_MIN:.0%}")
-    A("> - 营运现金流 (Operating Cash Flow) 为正")
-    A(f"> - *PEG 参考：< 1 低估，1~{PEG_FAIR} 合理*\n")
+    A("## 二、筛选框架（纯技术面，三条件须同时满足）\n")
+    A("> - **条件 A（领涨）**：个股在 XJO 上涨日的平均涨幅 **>** XJO 平均涨幅")
+    A(f"> - **条件 B（抗跌）**：个股在 XJO 下跌日的平均跌幅 **<** XJO 平均跌幅的 "
+      f"**{RESIST_FACTOR:.0%}**（极其抗跌，甚至逆势上涨）")
+    A("> - **条件 C（趋势护栏）**：当前价格站上 **50 日均线**\n")
     A("---\n")
 
     # 行业板块
-    A("## 三、行业板块筛选\n")
+    A("## 三、行业板块「领涨抗跌」相对强度\n")
     A(f"基准上涨日均涨幅 **{bm['avg_up']:.3%}** | 下跌日均跌幅 **{bm['avg_down']:.3%}** "
       f"| 抗跌阈值 **{bm['avg_down']*RESIST_FACTOR:.3%}**（基准跌幅×{RESIST_FACTOR:.0%}）\n")
     A("| 板块 | 上涨日均涨幅 | 下跌日均跌幅 | 条件A | 条件B | 结论 |")
@@ -473,98 +366,51 @@ def build_report(bm, sectors, all_stocks, passing_stocks, double_play):
         A("**本周无板块同时满足两项条件。** 建议关注仅满足单项条件（⚠️）的板块。")
     A("\n---\n")
 
-    # 个股技术面
-    A("## 四、个股技术面筛选（50日均线上 + 领涨抗跌）\n")
+    # 纯动量强势股
+    A("## ⭐ 四、纯动量强势股（同时满足 A / B / C 三条件）\n")
+    A("> 大盘涨时涨得更多、大盘跌时几乎不跌，且站稳 50 日均线之上的稀有标的。\n")
     if passing_stocks:
-        A("| 代码 | 名称 | 现价(A$) | 50日均线 | 高于均线 | 上涨日均涨幅 | 下跌日均跌幅 |")
-        A("|------|------|--------:|--------:|:-------:|:-----------:|:-----------:|")
+        A("| 代码 | 名称 | 现价(A$) | 50日均线 | 高于均线 | 上涨日均涨幅 | 超额涨幅 | 下跌日均跌幅 | 抗跌比率 |")
+        A("|------|------|--------:|--------:|:-------:|:-----------:|:-------:|:-----------:|:-------:|")
         for r in sorted(passing_stocks, key=lambda x: -x["avg_up"]):
             pct = r["price"] / r["ma50"] - 1
+            excess = r["avg_up"] - bm["avg_up"]
+            resist_ratio = r["avg_down"] / bm["avg_down"] if bm["avg_down"] else 0
             A(f"| **{r['ticker']}** | {r['name']} | {r['price']} | {r['ma50']} | "
-              f"+{pct:.1%} | {r['avg_up']:+.3%} | {r['avg_down']:+.3%} |")
-        A(f"\n**共 {len(passing_stocks)} 只标的通过技术面筛选。**")
+              f"+{pct:.1%} | {r['avg_up']:+.3%} | {excess:+.3%} | {r['avg_down']:+.3%} | "
+              f"{resist_ratio:.0%} |")
+        A(f"\n**共 {len(passing_stocks)} 只标的同时满足三个条件。**\n")
+
+        # 逐只点评（前 8 只）
+        for r in sorted(passing_stocks, key=lambda x: -x["avg_up"])[:8]:
+            pct = r["price"] / r["ma50"] - 1
+            excess = r["avg_up"] - bm["avg_up"]
+            resist_ratio = r["avg_down"] / bm["avg_down"] if bm["avg_down"] else 0
+            A(f"### {r['ticker']} — {r['name']}")
+            A(f"- **领涨 (A)**: 上涨日均涨 {r['avg_up']:+.3%}，超越 XJO **{excess:+.3%}**")
+            A(f"- **抗跌 (B)**: 下跌日均跌 {r['avg_down']:+.3%}，仅为 XJO 跌幅的 "
+              f"**{resist_ratio:.0%}**")
+            A(f"- **趋势 (C)**: 现价 A${r['price']}，高于 50 日均线 **{pct:+.1%}**")
+            A("")
     else:
-        A("**本周无个股同时满足全部技术条件。**\n")
-        A("观察名单（满足条件A且站上均线，但抗跌性不足）：")
+        A("**本周无个股同时满足全部三个条件。**\n")
+        A("观察名单（满足条件 A 领涨且站上均线，但抗跌性 B 不足）：\n")
         watch = [r for r in all_stocks
                  if r["above_ma50"] and r["beat_up"] and not r["resist_down"]]
         if watch:
-            A("| 代码 | 名称 | 现价 | 上涨日均涨幅 | 下跌日均跌幅 |")
-            A("|------|------|-----:|:-----------:|:-----------:|")
+            A("| 代码 | 名称 | 现价(A$) | 上涨日均涨幅 | 下跌日均跌幅 |")
+            A("|------|------|-------:|:-----------:|:-----------:|")
             for r in sorted(watch, key=lambda x: -x["avg_up"])[:10]:
-                A(f"| {r['ticker']} | {r['name']} | A${r['price']} | "
+                A(f"| {r['ticker']} | {r['name']} | {r['price']} | "
                   f"{r['avg_up']:+.3%} | {r['avg_down']:+.3%} |")
-    A("\n---\n")
-
-    # 基本面交叉验证
-    A("## 五、基本面交叉验证（巴菲特价值四项）\n")
-    if passing_stocks:
-        A("| 代码 | 名称 | PE | PEG | 股息率 | ROE | 营运现金流 | 估值✓ | 股息✓ | ROE✓ | OCF✓ | 双击 |")
-        A("|------|------|---:|----:|------:|----:|:---------:|:----:|:----:|:----:|:----:|:---:|")
-        for r in sorted(passing_stocks, key=lambda x: -x["criteria_met"]):
-            pe_s = f"{r['pe']:.1f}x" if r["pe"] is not None else "N/A"
-            peg_s = f"{r['peg']:.2f}" if r["peg"] is not None else "N/A"
-            dy_s = f"{r['dy']:.2%}" if r["dy"] is not None else "N/A"
-            roe_s = f"{r['roe']:.2%}" if r["roe"] is not None else "N/A"
-            ocf_s = "正" if r["ocf_ok"] else ("负" if r["ocf"] is not None else "N/A")
-            A(f"| {r['ticker']} | {r['name']} | {pe_s} | {peg_s} | {dy_s} | {roe_s} | {ocf_s} | "
-              f"{'✓' if r['val_ok'] else '✗'} | {'✓' if r['dy_ok'] else '✗'} | "
-              f"{'✓' if r['roe_ok'] else '✗'} | {'✓' if r['ocf_ok'] else '✗'} | "
-              f"{'⭐' if r['dbl_play'] else ''} |")
-        A("\n*估值✓ = PE≤" + f"{PE_MAX:.0f}" + " 或 PEG<" + f"{PEG_FAIR}" + " 任一达标*")
-    else:
-        A("无技术面通过标的，基本面验证已跳过。")
-    A("\n---\n")
-
-    # 双击高亮
-    A("## ⭐ 六、动量 + 价值「双击」标的\n")
-    A("> 同时满足**技术面领涨抗跌**与**全部四项价值标准**的稀有标的。\n")
-    if double_play:
-        A("| 代码 | 名称 | 现价(A$) | PE | PEG | 股息率 | ROE | 超额涨幅 | 抗跌比率 |")
-        A("|------|------|--------:|---:|----:|------:|----:|:-------:|:-------:|")
-        for r in sorted(double_play, key=lambda x: -x["avg_up"]):
-            excess = r["avg_up"] - bm["avg_up"]
-            resist_ratio = r["avg_down"] / bm["avg_down"] if bm["avg_down"] else 0
-            pe_s = f"{r['pe']:.1f}x" if r["pe"] is not None else "N/A"
-            peg_s = f"{r['peg']:.2f}" if r["peg"] is not None else "N/A"
-            A(f"| **{r['ticker']}** | {r['name']} | {r['price']} | {pe_s} | {peg_s} | "
-              f"{r['dy']:.2%} | {r['roe']:.2%} | {excess:+.3%} | {resist_ratio:.0%} |")
-        A("")
-        for r in sorted(double_play, key=lambda x: -x["avg_up"])[:5]:
-            pct = r["price"] / r["ma50"] - 1
-            resist_ratio = r["avg_down"] / bm["avg_down"] if bm["avg_down"] else 0
-            pe_s = f"{r['pe']:.1f}x" if r["pe"] is not None else "N/A"
-            peg_s = f"{r['peg']:.2f}" if r["peg"] is not None else "N/A"
-            val_note = "PE 达标" if r["pe_ok"] else (f"PE偏高但 PEG={peg_s} 合理" if r["peg_ok"] else "")
-            A(f"### {r['ticker']} — {r['name']}")
-            A(f"- **技术面**: 现价 A${r['price']}，高于50日均线 **{pct:+.1%}**；"
-              f"上涨日均涨 {r['avg_up']:+.3%}（超 XJO {r['avg_up']-bm['avg_up']:+.3%}），"
-              f"下跌日仅承受 XJO 跌幅的 {resist_ratio:.0%}")
-            A(f"- **基本面**: PE **{pe_s}**，PEG **{peg_s}**，股息率 **{r['dy']:.2%}**，"
-              f"ROE **{r['roe']:.2%}**，营运现金流为正（{val_note}）")
-            A(f"- **简评**: 兼具上行动量、抗跌韧性与价值安全边际，建议结合最新财报、"
-              f"行业催化剂及负债结构进一步确认。")
-            A("")
-    elif passing_stocks:
-        A("**本周无完美双击标的。** 以下为最接近的候选（按满足价值条件数排序）：\n")
-        A("| 代码 | 名称 | PE | PEG | 股息率 | ROE | 营运现金流 | 满足条件 |")
-        A("|------|------|---:|----:|------:|----:|:---------:|:-------:|")
-        for r in sorted(passing_stocks, key=lambda x: -x["criteria_met"])[:5]:
-            pe_s = f"{r['pe']:.1f}x" if r["pe"] is not None else "N/A"
-            peg_s = f"{r['peg']:.2f}" if r["peg"] is not None else "N/A"
-            dy_s = f"{r['dy']:.2%}" if r["dy"] is not None else "N/A"
-            roe_s = f"{r['roe']:.2%}" if r["roe"] is not None else "N/A"
-            ocf_s = "正" if r["ocf_ok"] else ("负" if r["ocf"] is not None else "N/A")
-            A(f"| {r['ticker']} | {r['name']} | {pe_s} | {peg_s} | {dy_s} | {roe_s} | {ocf_s} | "
-              f"{r['criteria_met']}/4 |")
-    else:
-        A("本周无满足技术面的标的，故无双击候选。")
+        else:
+            A("（暂无接近标的。）")
     A("\n---\n")
 
     # 免责声明
     A("## 免责声明\n")
     A("本报告由本地 Python 脚本基于 Yahoo Finance 历史数据自动生成，分析区间约 3 个月。")
-    A("**仅供参考，不构成投资建议。** 过去的相对强度与基本面不代表未来收益，"
+    A("**仅供参考，不构成投资建议。** 过去的相对强度不代表未来收益，"
       "投资有风险，请独立判断。")
     A(f"\n*自动生成于 {today} | asx_scanner.py 本地运行*")
 
@@ -594,15 +440,14 @@ def resolve_desktop():
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
     print("=" * 60)
-    print("ASX 相对强度 + 巴菲特价值 双重选股扫描器")
+    print("ASX 纯动量「领涨抗跌」强势股扫描器")
     print("=" * 60)
 
     bm = analyse_benchmark()
     sectors = screen_sectors(bm)
     all_stocks, passing_stocks = screen_stocks_technical(bm)
-    double_play = fundamental_validation(passing_stocks) if passing_stocks else []
 
-    report = build_report(bm, sectors, all_stocks, passing_stocks, double_play)
+    report = build_report(bm, sectors, all_stocks, passing_stocks)
 
     # 保存到桌面
     desktop = resolve_desktop()
